@@ -55,8 +55,7 @@ class UdpConn {
 	uint16_t sessId;
 
 	RecursiveMutex accessMutex;
-	CondVar sendCondVar;
-	CondVar recvCondVar;
+	CondVar sendCondVar, recvCondVar;
 
 	// sending
 	Mutex sendMutex;
@@ -72,7 +71,6 @@ class UdpConn {
 
 	uint8_t outBuf[1200];
 	uint8_t inBuf[1200];
-	uint8_t dataBuf[1200];
 	int dataBufLen;
 
 public:
@@ -89,21 +87,16 @@ public:
 	void run();
 	void close();
 
-	void processPacket(int len);
+private:
 	void tmr();
+
+  void processPacket(Header* h, int payloadLen);
+
+	uint8_t getNextSendId(bool reset = false);
 
 	void _sendAck();
 	void _sendPing();
-
-	uint8_t getNextSendId(bool reset = false)
-	{
-		MutexGuard guard(accessMutex);
-		if (reset)
-			lastSendId = 0;
-		else
-			lastSendId++;
-		return lastSendId;
-	}
+	void _closeInternal();
 };
 
 #endif

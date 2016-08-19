@@ -5,8 +5,8 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#define UCLOG(x,...) UCLOG_FUNC("[%-14s] " x "\r\n", __FUNCTION__, ##__VA_ARGS__)
-#define UCLOGF() UCLOG_FUNC("[%-14s] ", __FUNCTION__)
+#define UCLOG(x,...)   UCLOG_FUNC("[%-14s] " x "\r\n", __FUNCTION__, ##__VA_ARGS__)
+#define UCLOGF()       UCLOG_FUNC("[%-14s] ", __FUNCTION__)
 #define UCLOGNL(x,...) UCLOG_FUNC(x, ##__VA_ARGS__)
 
 #define ERROR_OK               0
@@ -14,6 +14,8 @@
 #define ERROR_NOSPACE         -2
 #define ERROR_CONNECTION_LOST -3
 #define ERROR_INVALID_STATE   -4
+
+#define PING_INTERVAL 1000
 
 UdpConn::UdpConn()
 {
@@ -25,6 +27,7 @@ UdpConn::UdpConn()
 void UdpConn::init()
 {
 	sock.init();
+	UCLOG("created socket with fd %d", sock.getFd());
 }
 
 int UdpConn::connect(const IPv4& ip, uint16_t port, uint32_t timeout)
@@ -84,12 +87,13 @@ int UdpConn::send(const void* data, int len, uint32_t timeout)
 
 	uint64_t startTime = OS::getTime();
 	while (OS::getTime() - startTime < timeout) {
-		UCLOGF(); UCLOGNL("sending DATA ["); header->print(); UCLOGNL("] UDP len: %d\r\n", len);
+		UCLOGF(); UCLOGNL("sending ["); header->print(); UCLOGNL("] UDP len: %d\r\n", len);
 		sock.send(ip, port, outBuf, sendLen);
 
 		UCLOG("waiting for ACK");
 		MutexGuard guard(accessMutex);
-		if (sendCondVar.waitFor(guard, TIME_WAIT_FOR_ACK, [this, &header]() { return lastSendAcked == header->id || connectionLostEvent; })) {
+		auto predicate = [this, &header]() { return lastSendAcked == header->id || connectionLostEvent; };
+		if (sendCondVar.waitFor(guard, TIME_WAIT_FOR_ACK, predicate)) {
 			if (lastSendAcked == header->id) {
 				UCLOG("send ACKed");
 				return ERROR_OK;
@@ -97,12 +101,15 @@ int UdpConn::send(const void* data, int len, uint32_t timeout)
 				UCLOG("connection lost event received");
 				connectionLostEvent = false;
 				return ERROR_CONNECTION_LOST;
+			} else {
+				return -999;
 			}
 		} else {
 			UCLOG("send attempt timed out, resending");
 		}
 	}
-	UCLOG("send timed out");
+	UCLOG("send timed out, closing socket");
+	_closeInternal();
 	return ERROR_TIMEOUT;
 }
 int UdpConn::recv(void* data, int len, uint32_t timeout)
@@ -111,12 +118,13 @@ int UdpConn::recv(void* data, int len, uint32_t timeout)
 	if (sessId == 0)
 		return ERROR_INVALID_STATE;
 
-	if (recvCondVar.waitFor(guard, timeout, [this]() { return !isInBufFree || connectionLostEvent; })) {
+	auto predicate = [this]() { return !isInBufFree || connectionLostEvent; };
+	if (recvCondVar.waitFor(guard, timeout, predicate)) {
 		if (!isInBufFree) {
 			if (len < dataBufLen)
 				return ERROR_NOSPACE;
 
-			memcpy(data, dataBuf, dataBufLen);
+			memcpy(data, inBuf, dataBufLen);
 			isInBufFree = true;
 
 			UCLOG("recv got");
@@ -137,27 +145,32 @@ int UdpConn::recv(void* data, int len, uint32_t timeout)
 
 void UdpConn::close()
 {
-	MutexGuard guard(accessMutex);
 	UCLOG("close method called");
-	if (sessId != 0) {
-		connectionLostEvent = true;
-		sessId = 0;
-		recvCondVar.notifyOne();
-	}
+	_closeInternal();
 }
 
 void UdpConn::run()
 {
-	char rip[16];
-	uint16_t rport;
+	Header header;
 	for (;;) {
-		int availRes = sock.waitForData(200);
+		int availRes = sock.waitForData(PING_INTERVAL / 2);
 		if (availRes == 1) {
 			int pendingLen = sock.available();
 
-			int r = sock.recv(rip, rport, inBuf, sizeof(inBuf), 0);
-			if (r > 0 && r <= 1200)
-				processPacket(r);
+			if (pendingLen == sizeof(Header)) {
+				// UCLOG("only header");
+				int r = sock.recv(&header, sizeof(Header), 0);
+				if (r == sizeof(Header)) {
+					processPacket(&header, 0);
+				}
+			} else {
+				// UCLOG("header + payload");
+				int r = sock.recv(inBuf, sizeof(inBuf), 0);
+				if (r > 0 && r <= 1200) {
+					Header *h = (Header*)inBuf;
+					processPacket(h, r - sizeof(Header));
+				}
+			}
 
 		} else if (availRes == 0) {
 			tmr();
@@ -165,20 +178,15 @@ void UdpConn::run()
 	}
 }
 
-void UdpConn::processPacket(int len)
+void UdpConn::processPacket(Header* h, int payloadLen)
 {
-	Header *h = (Header*)inBuf;
-	UCLOGF(); UCLOGNL("received ["); h->print(); UCLOGNL("] UDP len: %d\r\n", len);
+	UCLOGF(); UCLOGNL("received ["); h->print(); UCLOGNL("] UDP len: %d\r\n", payloadLen);
 
 	MutexGuard guard(accessMutex);
 
 	if (h->flags & FLAG_RST) {
 		UCLOG("connection reset received");
-		if (sessId != 0) {
-			connectionLostEvent = true;
-			sessId = 0;
-			recvCondVar.notifyOne();
-		}
+		_closeInternal();
 		return;
 	}
 
@@ -187,8 +195,6 @@ void UdpConn::processPacket(int len)
 		lastReceivedId = h->id;
 		sendCondVar.notifyOne();
 		UCLOG("got new sessId %u", sessId);
-		// lastPacketRecvTime =  OS::getTime();
-		// lastReceivedId = 0f;
 		lastPacketRecvTime = lastPingSendTime = OS::getTime();
 		return;
 	}
@@ -199,24 +205,19 @@ void UdpConn::processPacket(int len)
 	}
 
 	// connected to server
-
 	if (h->sessId != sessId) {
 		UCLOG("connection lost");
-		connectionLostEvent = true;
-		sessId = 0;
-		recvCondVar.notifyOne();
+		_closeInternal();
 		return;
 	}
 
 	if (h->flags & FLAG_DATA) {
 		uint8_t diff = h->id - lastReceivedId;
 		if (diff == 1) {
-			int payloadLen = len - sizeof(Header);
 			if (payloadLen > 0) {
 				if (isInBufFree) {
 					lastReceivedId = h->id;
 					dataBufLen = payloadLen;
-					memcpy(dataBuf, inBuf + sizeof(Header), dataBufLen);
 					isInBufFree = false;
 					recvCondVar.notifyOne();
 					UCLOG("saved data %d", dataBufLen);
@@ -246,21 +247,31 @@ void UdpConn::tmr()
 
 	// connected
 	if (sessId != 0) {
-		if (OS::getTime() - lastPingSendTime >= 1000) {
-			if (OS::getTime() - lastPacketRecvTime >= 1000) {
-				UCLOG("sending ping");
-				_sendPing();
-				lastPingSendTime = OS::getTime();
+		if (OS::getTime() - lastPingSendTime >= PING_INTERVAL) {
+			if (OS::getTime() - lastPacketRecvTime >= PING_INTERVAL) {
+				// skip sending ping if sending operation is in progress
+				if (sendMutex.trylock()) {
+					_sendPing();
+					sendMutex.unlock();
+					lastPingSendTime = OS::getTime();
+				}
 			}
 		}
 		if (OS::getTime() - lastPacketRecvTime >= 3000) {
-			UCLOG("connection lost");
-			connectionLostEvent = true;
-			sessId = 0;
-			sendCondVar.notifyOne();
-			recvCondVar.notifyOne();
+			UCLOG("no pakcet received within interval connection lost");
+			_closeInternal();
 		}
 	}
+}
+
+uint8_t UdpConn::getNextSendId(bool reset)
+{
+	// sendMutex acquired;
+	if (reset)
+		lastSendId = 0;
+	else
+		lastSendId++;
+	return lastSendId;
 }
 
 void UdpConn::_sendAck()
@@ -272,12 +283,30 @@ void UdpConn::_sendAck()
 
 	sock.send(ip, port, &h, sizeof(h));
 }
+
 void UdpConn::_sendPing()
 {
+  // sendMutex and accessMutex already locked
+	if (sessId == 0)
+		return;
+
 	Header h;
 	h.sessId = sessId;
 	h.id = getNextSendId();
 	h.flags = FLAG_DATA;
 
+	UCLOGF(); UCLOGNL("sending ping ["); h.print(); UCLOGNL("]\r\n");
+
 	sock.send(ip, port, &h, sizeof(h));
+}
+
+void UdpConn::_closeInternal()
+{
+	MutexGuard guard(accessMutex);
+	if (sessId != 0) {
+		connectionLostEvent = true;
+		sessId = 0;
+		recvCondVar.notifyOne();
+		sendCondVar.notifyOne();
+	}
 }
