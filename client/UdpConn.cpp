@@ -87,7 +87,8 @@ int UdpConn::send(const void* data, uint32_t offset, uint32_t len, uint32_t time
 			return ERROR_INVALID_STATE;
 	}
 
-	memcpy(outBuf + sizeof(Header), (uint8_t*)data + offset, len);
+	if (data)
+		memcpy(outBuf + sizeof(Header), (uint8_t*)data + offset, len);
 	return _sendInternal(len, timeout);
 }
 
@@ -155,7 +156,7 @@ int UdpConn::recv(void* data, uint32_t offset, uint32_t len, uint32_t timeout)
 				return ERROR_NOSPACE;
 
 			if (data)
-				memcpy((uint8_t*)data + offset, inBuf, dataBufLen);
+				memcpy((uint8_t*)data + offset, inBuf + sizeof(Header), dataBufLen);
 			isInBufFree = true;
 
 			UCLOG("recv got");

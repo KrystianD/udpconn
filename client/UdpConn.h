@@ -87,7 +87,7 @@ class UdpConn {
 
 	uint8_t outBuf[1200];
 	uint8_t inBuf[1200];
-	int dataBufLen;
+	uint32_t dataBufLen;
 
 public:
 	UdpConn();
@@ -104,6 +104,9 @@ public:
   UdpConnSendSession createSendSession();
 
 	uint8_t* getInBufPointer() const { return (uint8_t*)inBuf + sizeof(Header); }
+	uint32_t getInBufCapacity() const { return sizeof(outBuf) - sizeof(Header); }
+	uint8_t* getOutBufPointer() const { return (uint8_t*)outBuf + sizeof(Header); }
+	uint32_t getOutBufCapacity() const { return sizeof(outBuf) - sizeof(Header); }
 
 	void run();
 	void close();
