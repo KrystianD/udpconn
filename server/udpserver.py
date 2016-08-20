@@ -126,8 +126,9 @@ class UdpConnClient:
                     self.last_send_id += 1
             return self.last_send_id
 
-    def mark_disconnection(self):
-        self._send_rst()
+    def mark_disconnection(self, send_rst=True):
+        if send_rst:
+            self._send_rst()
         self.on_disconnected()
         self.sess_id = 0
         self.to_delete = True
@@ -145,7 +146,7 @@ class UdpConnClient:
         if h.flags & FLAG_SYN:
             if self.sess_id != 0:
                 self.log("connection already established")
-                self.mark_disconnection()
+                self.mark_disconnection(send_rst=False)
                 return
 
             self.sess_id = random.randint(1, 2 ** 16 - 1)

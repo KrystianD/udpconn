@@ -47,9 +47,25 @@ struct Header {
 };
 #pragma pack()
 
+class UdpConn;
+
+class UdpConnSendSession : public IStream {
+  UdpConn* udpConn;
+  uint16_t pos;
+
+public:
+  UdpConnSendSession(UdpConn* udpConn) : udpConn(udpConn) { }
+
+	int read(void* data, uint32_t offset, uint32_t length, uint32_t timeout = 0xffffffff) { return 0; }
+  int write(const void* data, uint32_t offset, uint32_t len, uint32_t timeout = 0xffffffff);
+
+  int send(uint32_t timeout = 0xffffffff);
+
+  friend class UdpConn;
+};
+
 class UdpConn {
-	IPv4 ip;
-	uint16_t port;
+	InetAddress addr;
 	UdpSocket sock;
 
 	uint16_t sessId;
@@ -58,7 +74,7 @@ class UdpConn {
 	CondVar sendCondVar, recvCondVar;
 
 	// sending
-	Mutex sendMutex;
+	RecursiveMutex sendMutex;
 	uint8_t lastSendId;
 	uint8_t lastSendAcked;
 	uint64_t lastPingSendTime;
@@ -78,16 +94,24 @@ public:
 
 	void init();
 
-	int connect(const char* ip, uint16_t port, uint32_t timeout = 0xffffffff) { return connect(IPv4::parse(ip), port, timeout); }
-	int connect(const IPv4& ip, uint16_t port, uint32_t timeout = 0xffffffff);
+	int connect(const char* ip, uint16_t port, uint32_t timeout = 0xffffffff) { return connect(InetAddress(IPv4::parse(ip), port), timeout); }
+	int connect(const IPv4& ip, uint16_t port, uint32_t timeout = 0xffffffff) { return connect(InetAddress(ip, port), timeout); }
+	int connect(const InetAddress& addr, uint32_t timeout = 0xffffffff);
 
-	int send(const void* data, int len, uint32_t timeout = 0xffffffff);
-	int recv(void* data, int len, uint32_t timeout = 0xffffffff);
+	int send(const void* data, uint32_t offset, uint32_t len, uint32_t timeout = 0xffffffff);
+	int recv(void* data, uint32_t offset, uint32_t len, uint32_t timeout = 0xffffffff);
+
+  UdpConnSendSession createSendSession();
+
+	uint8_t* getInBufPointer() const { return (uint8_t*)inBuf + sizeof(Header); }
 
 	void run();
 	void close();
 
 private:
+	int sendBuffer(uint32_t len, uint32_t timeout = 0xffffffff);
+	int _sendInternal(uint32_t len, uint32_t timeout = 0xffffffff);
+
 	void tmr();
 
   void processPacket(Header* h, int payloadLen);
@@ -97,6 +121,8 @@ private:
 	void _sendAck();
 	void _sendPing();
 	void _closeInternal();
+
+  friend class UdpConnSendSession;
 };
 
 #endif
