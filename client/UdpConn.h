@@ -25,9 +25,11 @@ using namespace nativelib;
 #define FLAG_SYN     4
 #define FLAG_SYNACK  8
 #define FLAG_RST     16
+#define FLAG_PING    32
 
 const uint32_t TIME_WAIT_FOR_ACK = 200;
-const int MAX_RETRANSMISSIONS = 10;
+const uint32_t MAX_PACKET_SIZE = 1200;
+const uint32_t PING_INTERVAL = 1000;
 
 #pragma pack(1)
 struct Header {
@@ -43,6 +45,7 @@ struct Header {
 		if (flags & FLAG_SYN) UCLOGNL(" SYN");
 		if (flags & FLAG_SYNACK) UCLOGNL(" SYNACK");
 		if (flags & FLAG_RST) UCLOGNL(" RST");
+		if (flags & FLAG_PING) UCLOGNL(" PING");
 	}
 };
 #pragma pack()
@@ -56,7 +59,7 @@ class UdpConnSendSession : public IStream {
 public:
   UdpConnSendSession(UdpConn* udpConn) : udpConn(udpConn) { }
 
-	int read(void* data, uint32_t offset, uint32_t length, uint32_t timeout = 0xffffffff) { return 0; }
+	int read(void* data, uint32_t offset, uint32_t length, uint32_t timeout = 0xffffffff) { return -1; }
   int write(const void* data, uint32_t offset, uint32_t len, uint32_t timeout = 0xffffffff);
 
   int send(uint32_t timeout = 0xffffffff);
@@ -80,13 +83,13 @@ class UdpConn {
 	uint64_t lastPingSendTime;
 
 	// receiving
-	bool isInBufFree, connectionLostEvent;
+	bool isInBufFree;
 	Mutex readMutex;
 	uint8_t lastReceivedId;
 	uint64_t lastPacketRecvTime;
 
-	uint8_t outBuf[1200];
-	uint8_t inBuf[1200];
+	uint8_t outBuf[MAX_PACKET_SIZE];
+	uint8_t inBuf[MAX_PACKET_SIZE];
 	uint32_t dataBufLen;
 
 public:

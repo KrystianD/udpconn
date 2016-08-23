@@ -15,12 +15,10 @@
 #define ERROR_CONNECTION_LOST -3
 #define ERROR_INVALID_STATE   -4
 
-#define PING_INTERVAL 1000
-
-void dumpHeader(const char* prefix, Header* header, int len = -1)
+#define DUMPHEADER(a,b,c) dumpHeader(__FUNCTION__,a,b,c);
+void dumpHeader(const char* func, const char* prefix, Header* header, int len)
 {
-	UCLOGF();
-	UCLOGNL("%-12s [", prefix);
+	UCLOGNL("[%-13s] %-12s [", func, prefix);
 	header->print();
 	if (len != -1)
 		UCLOGNL("] UDP len: %d\r\n", len);
@@ -67,7 +65,6 @@ int UdpConn::connect(const InetAddress& addr, uint32_t timeout)
 		MutexGuard guard(accessMutex);
 		if (sendCondVar.waitFor(guard, TIME_WAIT_FOR_ACK, [this]() { return sessId != 0; })) {
 			UCLOG("connection ACKed");
-			// connectionLostEvent = false;
 			return 0;
 		} else {
 			UCLOG("connection attempt timed out, resending");
@@ -117,7 +114,7 @@ int UdpConn::_sendInternal(uint32_t len, uint32_t timeout)
 
 	uint64_t startTime = OS::getTime();
 	while (OS::getTime() - startTime < timeout) {
-		dumpHeader("sending", header, len);
+		DUMPHEADER("sending", header, len);
 		sock.send(addr, outBuf, sendLen);
 
 		UCLOG("waiting for ACK");
@@ -129,7 +126,6 @@ int UdpConn::_sendInternal(uint32_t len, uint32_t timeout)
 				return ERROR_OK;
 			} else if (sessId == 0) {
 				UCLOG("connection lost event received");
-				// connectionLostEvent = false;
 				return ERROR_CONNECTION_LOST;
 			} else {
 				return -999;
@@ -163,7 +159,6 @@ int UdpConn::recv(void* data, uint32_t offset, uint32_t len, uint32_t timeout)
 			return dataBufLen;
 		} else if (sessId == 0) {
 			UCLOG("connection lost event received");
-			// connectionLostEvent = false;
 			return ERROR_CONNECTION_LOST;
 		} else {
 			return -999;
@@ -205,7 +200,7 @@ void UdpConn::run()
 			} else {
 				// UCLOG("header + payload");
 				int r = sock.recv(inBuf, sizeof(inBuf), 0);
-				if (r > 0 && r <= 1200) {
+				if (r > 0 && (uint32_t)r <= MAX_PACKET_SIZE) {
 					Header* header = (Header*)inBuf;
 					processPacket(header, r - sizeof(Header));
 				}
@@ -219,7 +214,7 @@ void UdpConn::run()
 
 void UdpConn::processPacket(Header* header, int payloadLen)
 {
-	dumpHeader("received", header, payloadLen);
+	DUMPHEADER("received", header, payloadLen);
 
 	MutexGuard guard(accessMutex);
 
@@ -250,6 +245,10 @@ void UdpConn::processPacket(Header* header, int payloadLen)
 		return;
 	}
 
+	if (header->flags & FLAG_PING) {
+		lastPacketRecvTime = OS::getTime();
+	}
+
 	if (header->flags & FLAG_DATA) {
 		uint8_t diff = header->id - lastReceivedId;
 		if (diff == 1) {
@@ -269,7 +268,7 @@ void UdpConn::processPacket(Header* header, int payloadLen)
 		} else {
 			UCLOG("skipping packet got %d last %d (%d)", header->id, lastReceivedId, diff);
 		}
-		lastPacketRecvTime =  OS::getTime();
+		lastPacketRecvTime = OS::getTime();
 		UCLOG("sending ack");
 		_sendAck();
 	}
@@ -288,12 +287,8 @@ void UdpConn::tmr()
 	if (sessId != 0) {
 		if (OS::getTime() - lastPingSendTime >= PING_INTERVAL) {
 			if (OS::getTime() - lastPacketRecvTime >= PING_INTERVAL) {
-				// skip sending ping if sending operation is in progress
-				if (sendMutex.trylock()) {
-					_sendPing();
-					sendMutex.unlock();
-					lastPingSendTime = OS::getTime();
-				}
+				_sendPing();
+				lastPingSendTime = OS::getTime();
 			}
 		}
 		if (OS::getTime() - lastPacketRecvTime >= 3000) {
@@ -325,16 +320,15 @@ void UdpConn::_sendAck()
 
 void UdpConn::_sendPing()
 {
-	// sendMutex and accessMutex already locked
 	if (sessId == 0)
 		return;
 
 	Header h;
 	h.sessId = sessId;
-	h.id = getNextSendId();
-	h.flags = FLAG_DATA;
+	h.id = 0;
+	h.flags = FLAG_PING;
 
-	dumpHeader("sending ping", &h);
+	DUMPHEADER("sending ping", &h, -1);
 
 	sock.send(addr, &h, sizeof(h));
 }
@@ -343,7 +337,6 @@ void UdpConn::_closeInternal()
 {
 	MutexGuard guard(accessMutex);
 	if (sessId != 0) {
-		// connectionLostEvent = true;
 		sessId = 0;
 		recvCondVar.notifyOne();
 		sendCondVar.notifyOne();
@@ -355,7 +348,7 @@ int UdpConnSendSession::write(const void* data, uint32_t offset, uint32_t len, u
 	const uint8_t* _data = (uint8_t*)data + offset;
 	uint32_t i;
 	for (i = 0; i < len; i++) {
-		if (pos >= 1200)
+		if (pos >= MAX_PACKET_SIZE)
 			break;
 		udpConn->outBuf[pos] = _data[i];
 		pos++;

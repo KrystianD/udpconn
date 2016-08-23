@@ -15,6 +15,7 @@ FLAG_ACK = 2
 FLAG_SYN = 4
 FLAG_SYNACK = 8
 FLAG_RST = 16
+FLAG_PING = 32
 
 SEND_TIMEOUT = 5000 / 1000
 TIME_WAIT_FOR_ACK = 200 / 1000
@@ -55,6 +56,7 @@ class Header:
         if self.flags & FLAG_SYN: flags_str.append("SYN")
         if self.flags & FLAG_SYNACK: flags_str.append("SYNACK")
         if self.flags & FLAG_RST: flags_str.append("RST")
+        if self.flags & FLAG_PING: flags_str.append("PING")
         return "Header sessId: {0} id: {1}, flags: {2}".format(self.sessId, self.id, ' '.join(flags_str))
 
     def to_binary(self):
@@ -141,7 +143,7 @@ class UdpConnClient:
         h = Header.from_binary(packet, 0)
         payload = packet[hl:]
 
-        self.log("received: [{0}] {1}".format(h, payload))
+        self.log("received: [{0}] len: {1}".format(h, len(payload)))
 
         if h.flags & FLAG_SYN:
             if self.sess_id != 0:
@@ -170,6 +172,12 @@ class UdpConnClient:
         if h.sessId != self.sess_id:
             self.log("invalid sessId")
             self.mark_disconnection()
+            return
+
+        if h.flags & FLAG_PING:
+            self.log("answering to PING")
+            self._send_packet(self.sess_id, 0, FLAG_PING)
+            self.last_received_time = time.time()
             return
 
         if h.flags & FLAG_DATA:
