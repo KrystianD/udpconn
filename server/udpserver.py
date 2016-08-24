@@ -197,7 +197,6 @@ class UdpConnClient:
             else:
                 self.log("skipping packet got {0} last {1}".format(h.id, self.last_received_id))
             self.last_received_time = time.time()
-            self.log("sending ACK")
             self._send_ack()
             return
 
@@ -209,11 +208,17 @@ class UdpConnClient:
                     self.send_cond_var.notify()
                     self.log("received ACK for {0}".format(self.last_send_acked))
                 else:
-                    self.log("invalid ACK for {0} last {1}".format(h.id, self.last_send_acked))
-                    self.mark_disconnection()
+                    diff = uint16diff(h.id, self.last_send_acked)
+                    if diff < HALF_ID:  # skipped lot of packets
+                        self.log("invalid ACK for {0} last {1}".format(h.id, self.last_send_acked))
+                        self.mark_disconnection()
+                    else:  # duplicated ACK (already recevied)
+                        self.log("duplicated ACK for {0} last {1}".format(h.id, self.last_send_acked))
+
             return
 
     def _send_ack(self) -> None:
+        self.log("sending ACK ({0})".format(self.last_received_id))
         self._send_packet(self.sess_id, self.last_received_id, FLAG_ACK)
 
     def _send_rst(self) -> None:

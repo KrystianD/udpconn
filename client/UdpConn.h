@@ -34,7 +34,7 @@ const uint32_t PING_INTERVAL = 1000;
 #pragma pack(1)
 struct Header {
 	uint16_t sessId;
-	uint8_t id;
+	uint16_t id;
 	uint8_t flags;
 
 	void print()
@@ -78,14 +78,14 @@ class UdpConn {
 
 	// sending
 	RecursiveMutex sendMutex;
-	uint8_t lastSendId;
-	uint8_t lastSendAcked;
+	uint16_t lastSendId;
+	uint16_t lastSendAcked;
 	uint64_t lastPingSendTime;
 
 	// receiving
-	bool isInBufFree;
+	bool isInBufEmpty, isInBufReceived;
 	Mutex readMutex;
-	uint8_t lastReceivedId;
+	uint16_t lastReceivedId;
 	uint64_t lastPacketRecvTime;
 
 	uint8_t outBuf[MAX_PACKET_SIZE];
@@ -110,6 +110,7 @@ public:
 	uint32_t getInBufCapacity() const { return sizeof(outBuf) - sizeof(Header); }
 	uint8_t* getOutBufPointer() const { return (uint8_t*)outBuf + sizeof(Header); }
 	uint32_t getOutBufCapacity() const { return sizeof(outBuf) - sizeof(Header); }
+	void releaseInternalBuffer();
 
 	void run();
 	void close();
@@ -122,7 +123,7 @@ private:
 
   void processPacket(Header* h, int payloadLen);
 
-	uint8_t getNextSendId(bool reset = false);
+	uint16_t getNextSendId(bool reset = false);
 
 	void _sendAck();
 	void _sendPing();

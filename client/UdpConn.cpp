@@ -18,7 +18,7 @@
 #define DUMPHEADER(a,b,c) dumpHeader(__FUNCTION__,a,b,c);
 void dumpHeader(const char* func, const char* prefix, Header* header, int len)
 {
-	UCLOGNL("[%-13s] %-12s [", func, prefix);
+	UCLOGNL("[%-14s] %-12s [", func, prefix);
 	header->print();
 	if (len != -1)
 		UCLOGNL("] UDP len: %d\r\n", len);
@@ -29,7 +29,8 @@ void dumpHeader(const char* func, const char* prefix, Header* header, int len)
 UdpConn::UdpConn()
 {
 	lastSendId = 0;
-	isInBufFree = true;
+	isInBufEmpty = true;
+	isInBufReceived = true;
 	sessId = 0;
 }
 
@@ -56,22 +57,18 @@ int UdpConn::connect(const InetAddress& addr, uint32_t timeout)
 	header->id = getNextSendId(true);
 	header->flags = FLAG_SYN;
 
-	uint64_t startTime = OS::getTime();
-	while (OS::getTime() - startTime < timeout) {
-		UCLOG("sending SYN");
-		sock.send(addr, header, sizeof(Header));
+	UCLOG("sending SYN");
+	sock.send(addr, header, sizeof(Header));
 
-		UCLOG("waiting for SYNACK");
-		MutexGuard guard(accessMutex);
-		if (sendCondVar.waitFor(guard, TIME_WAIT_FOR_ACK, [this]() { return sessId != 0; })) {
-			UCLOG("connection ACKed");
-			return 0;
-		} else {
-			UCLOG("connection attempt timed out, resending");
-		}
+	UCLOG("waiting for SYNACK");
+	MutexGuard guard2(accessMutex);
+	if (sendCondVar.waitFor(guard2, timeout, [this]() { return sessId != 0; })) {
+		UCLOG("connection ACKed");
+		return 0;
+	} else {
+		UCLOG("connection timed out");
+		return ERROR_TIMEOUT;
 	}
-	UCLOG("connection timed out");
-	return ERROR_TIMEOUT;
 }
 
 int UdpConn::send(const void* data, uint32_t offset, uint32_t len, uint32_t timeout)
@@ -145,15 +142,17 @@ int UdpConn::recv(void* data, uint32_t offset, uint32_t len, uint32_t timeout)
 	if (sessId == 0)
 		return ERROR_INVALID_STATE;
 
-	auto predicate = [this]() { return !isInBufFree || sessId == 0; };
+	auto predicate = [this]() { return (!isInBufEmpty && !isInBufReceived) || sessId == 0; };
 	if (recvCondVar.waitFor(guard, timeout, predicate)) {
-		if (!isInBufFree) {
+		if (!isInBufEmpty && !isInBufReceived) {
 			if (len < dataBufLen)
 				return ERROR_NOSPACE;
 
-			if (data)
+			if (data) {
 				memcpy((uint8_t*)data + offset, inBuf + sizeof(Header), dataBufLen);
-			isInBufFree = true;
+				isInBufEmpty = true;
+			}
+			isInBufReceived = true;
 
 			UCLOG("recv got");
 			return dataBufLen;
@@ -177,6 +176,12 @@ UdpConnSendSession UdpConn::createSendSession()
 	return c;
 }
 
+void UdpConn::releaseInternalBuffer()
+{
+	MutexGuard guard(accessMutex);
+	isInBufEmpty = true;
+}
+
 void UdpConn::close()
 {
 	UCLOG("close method called");
@@ -198,14 +203,20 @@ void UdpConn::run()
 					processPacket(&header, 0);
 				}
 			} else {
-				// UCLOG("header + payload");
-				int r = sock.recv(inBuf, sizeof(inBuf), 0);
-				if (r > 0 && (uint32_t)r <= MAX_PACKET_SIZE) {
-					Header* header = (Header*)inBuf;
-					processPacket(header, r - sizeof(Header));
+				if (isInBufEmpty && isInBufReceived) {
+					// UCLOG("header + payload");
+					int r = sock.recv(inBuf, sizeof(inBuf), 0);
+					if (r > 0 && (uint32_t)r <= MAX_PACKET_SIZE) {
+						Header* header = (Header*)inBuf;
+						processPacket(header, r - sizeof(Header));
+					}
+				} else {
+					char d;
+					// no space in input data buffer, packet is discarded
+					sock.recv(&d, 1, 0);
+					UCLOG("no space in input buffer");
 				}
 			}
-
 		} else if (availRes == 0) {
 			tmr();
 		}
@@ -227,9 +238,9 @@ void UdpConn::processPacket(Header* header, int payloadLen)
 	if (header->flags & FLAG_SYNACK) {
 		sessId = header->sessId;
 		lastReceivedId = header->id;
-		sendCondVar.notifyOne();
 		UCLOG("got new sessId %u", sessId);
 		lastPacketRecvTime = lastPingSendTime = OS::getTime();
+		sendCondVar.notifyOne();
 		return;
 	}
 
@@ -253,23 +264,17 @@ void UdpConn::processPacket(Header* header, int payloadLen)
 		uint8_t diff = header->id - lastReceivedId;
 		if (diff == 1) {
 			if (payloadLen > 0) {
-				if (isInBufFree) {
-					lastReceivedId = header->id;
-					dataBufLen = payloadLen;
-					isInBufFree = false;
-					recvCondVar.notifyOne();
-					UCLOG("saved data %d", dataBufLen);
-				} else {
-					// no space in input data buffer, packet is ignored
-					UCLOG("no space in input buffer");
-					return;
-				}
+				lastReceivedId = header->id;
+				dataBufLen = payloadLen;
+				isInBufEmpty = false;
+				isInBufReceived = false;
+				recvCondVar.notifyOne();
+				UCLOG("saved data %d", dataBufLen);
 			}
 		} else {
 			UCLOG("skipping packet got %d last %d (%d)", header->id, lastReceivedId, diff);
 		}
 		lastPacketRecvTime = OS::getTime();
-		UCLOG("sending ack");
 		_sendAck();
 	}
 
@@ -298,7 +303,7 @@ void UdpConn::tmr()
 	}
 }
 
-uint8_t UdpConn::getNextSendId(bool reset)
+uint16_t UdpConn::getNextSendId(bool reset)
 {
 	// sendMutex acquired
 	if (reset)
@@ -310,6 +315,9 @@ uint8_t UdpConn::getNextSendId(bool reset)
 
 void UdpConn::_sendAck()
 {
+	// accessMutex acquired
+	UCLOG("sending ack (%d)", lastReceivedId);
+
 	Header h;
 	h.sessId = sessId;
 	h.id = lastReceivedId;
