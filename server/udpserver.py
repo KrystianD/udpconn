@@ -1,7 +1,8 @@
+import logging
+
 import abc
 import asyncio, struct
 import queue
-from asyncio import BaseEventLoop
 from typing import List
 import threading
 
@@ -17,6 +18,7 @@ FLAG_SYNACK = 8
 FLAG_RST = 16
 FLAG_PING = 32
 
+MAX_PACKET_SIZE = 1200
 SEND_TIMEOUT = 5000 / 1000
 TIME_WAIT_FOR_ACK = 200 / 1000
 TIME_MIDDLE_PACKET = 20 / 1000
@@ -26,8 +28,8 @@ ERROR_TIMEOUT = -1
 ERROR_NOSPACE = -2
 ERROR_CONNECTION_LOST = -3
 
-HALF_ID = 256 / 2
 MAX_ID = 0xff
+HALF_ID = MAX_ID / 2
 
 
 def uint8diff(a, b):
@@ -94,7 +96,7 @@ class UdpConnClient:
     last_received_time = None  # type: int
 
     def log(self, x):
-        print("[{}] {}[client {}:{}]{} {}".format(get_date_str(), Fore.LIGHTMAGENTA_EX, self.ip, self.port, Fore.RESET, x))
+        logging.info("[{}] {}[client {}:{}]{} {}".format(get_date_str(), Fore.LIGHTMAGENTA_EX, self.ip, self.port, Fore.RESET, x))
 
     def __init__(self, srv: 'UdpConnServer', ip: str, port: int) -> None:
         self.srv = srv
@@ -293,13 +295,13 @@ class UdpConnServer:
     incoming_queue = None  # type: queue.Queue
 
     def log(self, x):
-        print("[{}] {}[server]{} {}".format(get_date_str(), Fore.YELLOW, Fore.RESET, x))
+        logging.info("[{}] {}[server]{} {}".format(get_date_str(), Fore.YELLOW, Fore.RESET, x))
 
     def __init__(self, client_cls):
         self.client_cls = client_cls
 
     def process_packet(self, packet: bytes, ip: str, port: int) -> None:
-        if len(packet) > 1200:
+        if len(packet) > MAX_PACKET_SIZE:
             self.log("too long packet")
             return
 
