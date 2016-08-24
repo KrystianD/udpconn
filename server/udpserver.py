@@ -28,7 +28,7 @@ ERROR_TIMEOUT = -1
 ERROR_NOSPACE = -2
 ERROR_CONNECTION_LOST = -3
 
-MAX_ID = 0xff
+MAX_ID = 0xffff
 HALF_ID = MAX_ID / 2
 
 
@@ -39,12 +39,19 @@ def uint8diff(a, b):
         return 256 - b + a
 
 
+def uint16diff(a, b):
+    if a >= b:
+        return a - b
+    else:
+        return 256 * 256 - b + a
+
+
 def get_date_str():
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
 class Header:
-    FMT = "<HBB"
+    FMT = "<HHB"
 
     sessId = 0  # type; int
     id = 0  # type: int
@@ -183,7 +190,7 @@ class UdpConnClient:
             return
 
         if h.flags & FLAG_DATA:
-            if uint8diff(h.id, self.last_received_id) == 1:
+            if uint16diff(h.id, self.last_received_id) == 1:
                 self.last_received_id = h.id
                 if len(payload) > 0:
                     self.on_new_packet(payload)
@@ -197,7 +204,7 @@ class UdpConnClient:
         if h.flags & FLAG_ACK:
             self.last_received_time = time.time()
             with self.access_mutex:
-                if self.last_send_acked is None or uint8diff(h.id, self.last_send_acked) == 1:
+                if self.last_send_acked is None or uint16diff(h.id, self.last_send_acked) == 1:
                     self.last_send_acked = h.id
                     self.send_cond_var.notify()
                     self.log("received ACK for {0}".format(self.last_send_acked))
@@ -243,7 +250,7 @@ class UdpConnClient:
         while time.time() - start_time < SEND_TIMEOUT:
 
             def has_been_acked(p):
-                return self.last_send_acked is not None and uint8diff(self.last_send_acked, p[0].id) < HALF_ID
+                return self.last_send_acked is not None and uint16diff(self.last_send_acked, p[0].id) < HALF_ID
 
             for p in packets:
                 if not has_been_acked(p):
