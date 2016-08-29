@@ -139,6 +139,7 @@ class UdpConnClient:
 
     def mark_disconnection(self, send_rst=True):
         if send_rst:
+            self.log("sending RST")
             self._send_rst()
         self.on_disconnected()
         self.sess_id = 0
@@ -202,6 +203,7 @@ class UdpConnClient:
 
         if h.flags & FLAG_ACK:
             self.last_received_time = time.time()
+            do_mark_disconnection = False
             with self.access_mutex:
                 if self.last_send_acked is None or uint16diff(h.id, self.last_send_acked) == 1:
                     self.last_send_acked = h.id
@@ -209,12 +211,14 @@ class UdpConnClient:
                     self.log("received ACK for {0}".format(self.last_send_acked))
                 else:
                     diff = uint16diff(h.id, self.last_send_acked)
-                    if diff < HALF_ID:  # skipped lot of packets
+                    if diff != 0 and diff < HALF_ID:  # skipped lot of packets
                         self.log("invalid ACK for {0} last {1}".format(h.id, self.last_send_acked))
-                        self.mark_disconnection()
+                        do_mark_disconnection = True
                     else:  # duplicated ACK (already recevied)
                         self.log("duplicated ACK for {0} last {1}".format(h.id, self.last_send_acked))
 
+            if do_mark_disconnection:
+                self.mark_disconnection()
             return
 
     def _send_ack(self) -> None:
